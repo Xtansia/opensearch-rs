@@ -30,9 +30,6 @@
 
 //! HTTP components
 
-#[cfg(feature = "aws-auth")]
-pub(crate) mod aws_auth;
-
 pub mod headers;
 pub mod middleware;
 pub mod request;
