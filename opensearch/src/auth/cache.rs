@@ -44,17 +44,18 @@ pub const DEFAULT_BUFFER_TIME_JITTER_FRACTION: f64 = 0.5;
 ///
 /// ```rust,no_run
 /// # #[cfg(feature = "aws-auth")] {
-/// use aws_credential_types::provider::SharedCredentialsProvider;
-/// use opensearch::auth::{cache::CachedCredentialsProvider, Credentials};
+/// use opensearch::auth::cache::CachedCredentialsProvider;
+/// use opensearch::aws::AwsSigV4Builder;
 ///
 /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// let aws_config = aws_config::load_from_env().await;
-/// let region = aws_config.region().expect("region").clone();
 /// let inner = aws_config.credentials_provider().expect("creds");
 ///
 /// let cached = CachedCredentialsProvider::from_shared(inner);
-/// let creds = Credentials::AwsSigV4(SharedCredentialsProvider::new(cached), region);
-/// # let _ = creds;
+/// let sigv4 = AwsSigV4Builder::from(aws_config)
+///     .credentials_provider(cached)
+///     .build()?;
+/// # let _ = sigv4;
 /// # Ok(())
 /// # }
 /// # }

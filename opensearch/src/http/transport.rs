@@ -29,13 +29,10 @@
  */
 
 //! HTTP transport and connection components
-
-#[cfg(any(feature = "native-tls", feature = "rustls-tls"))]
-use crate::auth::ClientCertificate;
 #[cfg(any(feature = "native-tls", feature = "rustls-tls"))]
 use crate::cert::CertificateValidation;
 use crate::{
-    auth::Credentials,
+    auth::{ClientCertificate, Credentials},
     cert::CertificateError,
     error::{BoxError, Error},
     http::{
@@ -49,8 +46,6 @@ use crate::{
         Method,
     },
 };
-#[cfg(feature = "aws-auth")]
-use aws_types::sdk_config::SharedTimeSource;
 use base64::{prelude::BASE64_STANDARD, write::EncoderWriter as Base64Encoder};
 use bytes::BytesMut;
 use dyn_clone::clone_trait_object;
@@ -116,10 +111,6 @@ pub struct TransportBuilder {
     disable_proxy: bool,
     headers: HeaderMap,
     timeout: Option<Duration>,
-    #[cfg(feature = "aws-auth")]
-    sigv4_service_name: String,
-    #[cfg(feature = "aws-auth")]
-    sigv4_time_source: Option<SharedTimeSource>,
     client_initializers: Vec<Box<dyn BoxedClientInitializer>>,
     request_initializers: Vec<Box<dyn BoxedRequestInitializer>>,
     request_handlers: Vec<Box<dyn BoxedRequestHandler>>,
@@ -142,10 +133,6 @@ impl TransportBuilder {
             disable_proxy: false,
             headers: HeaderMap::new(),
             timeout: None,
-            #[cfg(feature = "aws-auth")]
-            sigv4_service_name: "es".to_string(),
-            #[cfg(feature = "aws-auth")]
-            sigv4_time_source: None,
             client_initializers: Vec::new(),
             request_initializers: Vec::new(),
             request_handlers: Vec::new(),
@@ -213,24 +200,6 @@ impl TransportBuilder {
     /// Default is no timeout.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
-        self
-    }
-
-    /// Sets the AWS SigV4 signing service name.
-    ///
-    /// Default is "es". Other supported services are "aoss" for OpenSearch Serverless.
-    #[cfg(feature = "aws-auth")]
-    pub fn service_name(mut self, service_name: &str) -> Self {
-        self.sigv4_service_name = service_name.to_string();
-        self
-    }
-
-    /// Sets the AWS SigV4 signing time source.
-    ///
-    /// Default is `SystemTimeSource`
-    #[cfg(feature = "aws-auth")]
-    pub fn sigv4_time_source(mut self, sigv4_time_source: SharedTimeSource) -> Self {
-        self.sigv4_time_source = Some(sigv4_time_source);
         self
     }
 
@@ -490,10 +459,6 @@ impl TransportBuilder {
             conn_pool: self.conn_pool,
             credentials: self.credentials,
             default_headers: self.headers,
-            #[cfg(feature = "aws-auth")]
-            sigv4_service_name: self.sigv4_service_name,
-            #[cfg(feature = "aws-auth")]
-            sigv4_time_source: self.sigv4_time_source.unwrap_or_default(),
             request_initializers: self.request_initializers.into_boxed_slice(),
             request_handlers: self.request_handlers.into_boxed_slice(),
         })
@@ -536,10 +501,6 @@ pub struct Transport {
     credentials: Option<Credentials>,
     conn_pool: Box<dyn ConnectionPool>,
     default_headers: HeaderMap,
-    #[cfg(feature = "aws-auth")]
-    sigv4_service_name: String,
-    #[cfg(feature = "aws-auth")]
-    sigv4_time_source: SharedTimeSource,
     request_initializers: Box<[Box<dyn BoxedRequestInitializer>]>,
     request_handlers: Box<[Box<dyn BoxedRequestHandler>]>,
 }
@@ -613,8 +574,6 @@ impl Transport {
                         HeaderValue::from_bytes(&header_value).unwrap(),
                     )
                 }
-                #[cfg(feature = "aws-auth")]
-                Credentials::AwsSigV4(_, _) => request_builder,
             }
         }
 
@@ -657,23 +616,8 @@ impl Transport {
             })
             .map_err(Error::request_initializer)?;
 
-        #[cfg_attr(not(feature = "aws-auth"), allow(unused_mut))]
-        let mut request = request_builder.build()?;
-
-        #[cfg(feature = "aws-auth")]
-        if let Some(Credentials::AwsSigV4(credentials_provider, region)) = &self.credentials {
-            super::aws_auth::sign_request(
-                &mut request,
-                credentials_provider,
-                &self.sigv4_service_name,
-                region,
-                &self.sigv4_time_source,
-            )
-            .await?;
-        }
-
         let response = RequestHandlerChain::new(&self.client, &self.request_handlers)
-            .run(request)
+            .run(request_builder.build()?)
             .await?;
 
         Ok(Response::new(response, method))

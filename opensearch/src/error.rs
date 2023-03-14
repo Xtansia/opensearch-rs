@@ -80,10 +80,6 @@ enum Kind {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::error::Error),
 
-    #[cfg(feature = "aws-auth")]
-    #[error("AwsSigV4 error: {0}")]
-    AwsSigV4(#[from] crate::http::aws_auth::AwsSigV4Error),
-
     #[error("request initializer error: {0}")]
     RequestInitializer(#[source] BoxError<'static>),
 

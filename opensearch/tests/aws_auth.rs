@@ -18,15 +18,16 @@ use std::sync::{
 };
 
 use aws_credential_types::{
-    provider::{future, ProvideCredentials, SharedCredentialsProvider},
+    provider::{future, ProvideCredentials},
     Credentials as AwsCredentials,
 };
 use aws_smithy_async::time::StaticTimeSource;
 use aws_types::region::Region;
 use common::{server::MockServer, tracing_init};
 use opensearch::{
+    aws::AwsSigV4,
     auth::cache::CachedCredentialsProvider,
-    http::{headers::HOST, transport::TransportBuilder},
+    http::headers::HOST,
     indices::IndicesCreateParts,
 };
 use reqwest::header::HeaderValue;
@@ -68,37 +69,38 @@ impl ProvideCredentials for CountingCredentialsProvider {
     }
 }
 
-fn sigv4_config(transport: TransportBuilder, service_name: &str) -> TransportBuilder {
-    let aws_creds = AwsCredentials::new("test-access-key", "test-secret-key", None, None, "test");
-    let region = Region::new("ap-southeast-2");
-    let time_source = StaticTimeSource::from_secs(1673626117); // 2023-01-13 16:08:37 +0000
-
-    transport
-        .auth(opensearch::auth::Credentials::AwsSigV4(
-            SharedCredentialsProvider::new(aws_creds),
-            region,
-        ))
-        .service_name(service_name)
-        .sigv4_time_source(time_source.into())
-}
-
-fn sigv4_config_cached(transport: TransportBuilder, service_name: &str) -> TransportBuilder {
-    let aws_creds = AwsCredentials::new("test-access-key", "test-secret-key", None, None, "test");
-    let region = Region::new("ap-southeast-2");
-    let time_source = StaticTimeSource::from_secs(1673626117); // 2023-01-13 16:08:37 +0000
-
-    let cached = CachedCredentialsProvider::new(aws_creds);
-
-    transport
-        .auth(opensearch::auth::Credentials::AwsSigV4(
-            SharedCredentialsProvider::new(cached),
-            region,
-        ))
-        .service_name(service_name)
-        .sigv4_time_source(time_source.into())
-}
-
 const LOCALHOST: HeaderValue = HeaderValue::from_static("localhost");
+
+fn sigv4(service_name: &str, ignored_headers: &[&'static str]) -> AwsSigV4 {
+    let creds = AwsCredentials::new("test-access-key", "test-secret-key", None, None, "test");
+
+    sigv4_with_provider(creds, service_name, ignored_headers)
+}
+
+fn sigv4_cached(service_name: &str, ignored_headers: &[&'static str]) -> AwsSigV4 {
+    let creds = AwsCredentials::new("test-access-key", "test-secret-key", None, None, "test");
+    let cached = CachedCredentialsProvider::new(creds);
+
+    sigv4_with_provider(cached, service_name, ignored_headers)
+}
+
+fn sigv4_with_provider(
+    credentials_provider: impl ProvideCredentials + 'static,
+    service_name: &str,
+    ignored_headers: &[&'static str],
+) -> AwsSigV4 {
+    let builder = AwsSigV4::builder()
+        .credentials_provider(credentials_provider)
+        .region(Region::new("ap-southeast-2"))
+        .service_name(service_name.to_owned())
+        .time_source(StaticTimeSource::from_secs(1673626117)); // 2023-01-13 16:08:37 +0000
+
+    let builder = ignored_headers
+        .into_iter()
+        .fold(builder, |builder, &header| builder.ignore_header(header));
+
+    builder.build().expect("sigv4 config should be valid")
+}
 
 #[test_case("es", "10c9be415f4b9f15b12abbb16bd3e3730b2e6c76e0cf40db75d08a44ed04a3a1"; "when service name is es")]
 #[test_case("aoss", "34903aef90423aa7dd60575d3d45316c6ef2d57bbe564a152b41bf8f5917abf6"; "when service name is aoss")]
@@ -114,8 +116,10 @@ async fn aws_auth_signs_correctly(
 
     let host = format!("aaabbbcccddd111222333.ap-southeast-2.{service_name}.amazonaws.com");
 
-    let client =
-        server.client_with(|b| sigv4_config(b, service_name).header(HOST, host.parse().unwrap()));
+    let client = server.client_with(|b| {
+        b.aws_sigv4(sigv4(service_name, &[]))
+            .header(HOST, host.parse().unwrap())
+    });
 
     let _ = client
         .indices()
@@ -159,14 +163,13 @@ async fn aws_auth_get() -> anyhow::Result<()> {
     tracing_init();
 
     let mut server = MockServer::start()?;
-
-    let client = server.client_with(|b| sigv4_config(b, "custom").header(HOST, LOCALHOST));
+    let client = server.client_with(|b| b.aws_sigv4(sigv4("custom", &["host"])));
 
     let _ = client.ping().send().await?;
 
     let sent_req = server.received_request().await?;
 
-    assert_eq!(sent_req.header("authorization"), Some("AWS4-HMAC-SHA256 Credential=test-access-key/20230113/ap-southeast-2/custom/aws4_request, SignedHeaders=accept;content-type;host;x-amz-content-sha256;x-amz-date, Signature=e5aa6e5d9e1b86b86ed31fbb10dd62b4e93423b77830f8189701421d3e9f65bd"));
+    assert_eq!(sent_req.header("authorization"), Some("AWS4-HMAC-SHA256 Credential=test-access-key/20230113/ap-southeast-2/custom/aws4_request, SignedHeaders=accept;content-type;x-amz-content-sha256;x-amz-date, Signature=8c882ad6cff05cb6c5bc91a030a92582787f34ef4af858a728c6f943c4ff2f21"));
     assert_eq!(
         sent_req.header("x-amz-content-sha256"),
         Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
@@ -183,7 +186,10 @@ async fn aws_auth_through_cached_provider_produces_identical_signature() -> anyh
 
     let mut server = MockServer::start()?;
 
-    let client = server.client_with(|b| sigv4_config_cached(b, "custom").header(HOST, LOCALHOST));
+    let client = server.client_with(|b| {
+        b.aws_sigv4(sigv4_cached("custom", &[]))
+            .header(HOST, LOCALHOST)
+    });
 
     let _ = client.ping().send().await?;
 
@@ -203,19 +209,10 @@ async fn cached_provider_reuses_credentials_across_requests() -> anyhow::Result<
     tracing_init();
 
     let mut server = MockServer::start()?;
-    let region = Region::new("ap-southeast-2");
-    let time_source = StaticTimeSource::from_secs(1673626117); // 2023-01-13 16:08:37 +0000
     let (provider, calls) = CountingCredentialsProvider::new();
     let cached = CachedCredentialsProvider::new(provider);
-    let client = server.client_with(|b| {
-        b.auth(opensearch::auth::Credentials::AwsSigV4(
-            SharedCredentialsProvider::new(cached),
-            region,
-        ))
-        .service_name("custom")
-        .sigv4_time_source(time_source.into())
-        .header(HOST, LOCALHOST)
-    });
+    let sigv4 = sigv4_with_provider(cached, "custom", &[]);
+    let client = server.client_with(|b| b.aws_sigv4(sigv4).header(HOST, LOCALHOST));
 
     let _ = client.ping().send().await?;
     let _ = client.ping().send().await?;
@@ -234,7 +231,7 @@ async fn aws_auth_post() -> anyhow::Result<()> {
 
     let mut server = MockServer::start()?;
 
-    let client = server.client_with(|b| sigv4_config(b, "custom").header(HOST, LOCALHOST));
+    let client = server.client_with(|b| b.aws_sigv4(sigv4("custom", &[])));
 
     let _ = client
         .index(opensearch::IndexParts::Index("movies"))

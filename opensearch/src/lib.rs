@@ -74,7 +74,7 @@
 //!
 //! ```toml,no_run
 //! [dependencies]
-//! opensearch = "3.0.0"
+//! opensearch = "3"
 //! ```
 //! The following _optional_ dependencies may also be useful to create requests and read responses
 //!
@@ -341,29 +341,30 @@
 //!
 //! ```toml,no_run
 //! [dependencies]
-//! opensearch = { version = "3.0.0", features = ["aws-auth"] }
+//! opensearch = { version = "3", features = ["aws-auth"] }
 //! aws-config = "1"
 //! ```
 //!
 //! ```rust,no_run
-//! # use aws_config::meta::region::RegionProviderChain;
-//! # use opensearch::{
-//! #     Error, OpenSearch,
-//! #     http::transport::{TransportBuilder,SingleNodeConnectionPool},
-//! # };
-//! # use url::Url;
-//! # use std::convert::TryInto;
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! # #[cfg(feature = "aws-auth")] {
-//! let creds = aws_config::load_from_env().await;
+//! use opensearch::{
+//!     aws::{aws_config::{BehaviorVersion, self, meta::region::RegionProviderChain}, AwsSigV4Builder},
+//!     Error, OpenSearch,
+//!     http::transport::{TransportBuilder,SingleNodeConnectionPool},
+//! };
+//! use url::Url;
+//!
 //! let url = Url::parse("https://...")?;
 //! let region_provider = RegionProviderChain::default_provider().or_else("us-east-1");
-//! let aws_config = aws_config::from_env().region(region_provider).load().await.clone();
+//! let aws_config = aws_config::defaults(BehaviorVersion::latest()).region(region_provider).load().await.clone();
+//! let sigv4 = AwsSigV4Builder::from(aws_config)
+//!     .service_name("es") // use "aoss" for OpenSearch Serverless
+//!     .build()?;
 //! let conn_pool = SingleNodeConnectionPool::new(url);
 //! let transport = TransportBuilder::new(conn_pool)
-//!     .auth(aws_config.clone().try_into()?)
-//!     .service_name("es") // use "aoss" for OpenSearch Serverless
+//!     .aws_sigv4(sigv4)
 //!     .build()?;
 //! let client = OpenSearch::new(transport);
 //! # }
@@ -373,7 +374,7 @@
 //!
 //! ### Caching AWS credentials between requests
 //!
-//! The provider passed to [`Credentials::AwsSigV4`](crate::auth::Credentials::AwsSigV4) is
+//! The provider passed to [`AwsSigV4Builder::credentials_provider`](crate::aws::AwsSigV4Builder::credentials_provider) is
 //! invoked on every signed request. When credentials come from the IMDS or ECS metadata
 //! endpoint, this means an HTTP round-trip per request. Wrap the provider in
 //! [`auth::cache::CachedCredentialsProvider`](crate::auth::cache::CachedCredentialsProvider)
@@ -382,15 +383,16 @@
 //! ```rust,no_run
 //! # #[cfg(feature = "aws-auth")] {
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! use aws_credential_types::provider::SharedCredentialsProvider;
-//! use opensearch::auth::{cache::CachedCredentialsProvider, Credentials};
+//! use opensearch::auth::cache::CachedCredentialsProvider;
+//! use opensearch::aws::AwsSigV4Builder;
 //!
 //! let aws_config = aws_config::load_from_env().await;
-//! let region = aws_config.region().expect("region").clone();
 //! let inner = aws_config.credentials_provider().expect("creds");
 //! let cached = CachedCredentialsProvider::from_shared(inner);
-//! let creds = Credentials::AwsSigV4(SharedCredentialsProvider::new(cached), region);
-//! # let _ = creds;
+//! let sigv4 = AwsSigV4Builder::from(aws_config)
+//!     .credentials_provider(cached)
+//!     .build()?;
+//! # let _ = sigv4;
 //! # Ok(()) }
 //! # }
 //! ```
@@ -416,6 +418,8 @@ mod readme {
 }
 
 pub mod auth;
+#[cfg(feature = "aws-auth")]
+pub mod aws;
 pub mod cert;
 pub mod http;
 pub mod models;
